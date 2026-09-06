@@ -139,7 +139,7 @@ Use a generic plugin command:
 agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"...","url":"https://example.com"}'
 ```
 
-Credential plugins receive `credential.resolve` and return username, password, and optionally URL or selector metadata. Browser provider plugins receive `browser.launch` and return a CDP WebSocket URL. Launch mutator plugins receive `launch.mutate` and can append local launch args, extensions, or init script source before Chrome starts. Generic command plugins receive the request type passed to `plugin run`.
+Credential plugins receive `credential.resolve` with the `destination-bound-v1` contract and return username, password, the approved login origin and selectors, final URL and account marker, plus optional OTP metadata. agent-browser atomically checks the main-frame document before entering secrets, blocks off-origin document and credential-bearing requests during the attempt, and verifies the final destination and account identity before reporting success. Browser provider plugins receive `browser.launch` and return a CDP WebSocket URL. Launch mutator plugins receive `launch.mutate` and can append local launch args, extensions, or init script source before Chrome starts. Generic command plugins receive the request type passed to `plugin run`.
 
 `plugin run` is for `command.run` and custom capabilities. Core capabilities and protocol request types use their dedicated command paths so credential, browser-provider, and launch-mutator access stays inside the normal policy gates.
 
@@ -263,7 +263,7 @@ Example policy (restrictive):
   </tbody>
 </table>
 
-Auth vault operations keep secrets out of normal command output and LLM context. Domain allowlist restrictions still apply to `auth login` navigations. Plugin-backed logins also expose the capability action `plugin:<name>:credential.read` for policy and confirmation gates.
+Auth vault operations keep secrets out of normal command output and LLM context. Domain allowlist restrictions still apply to `auth login` navigations. Plugin-backed logins also expose the capability action `plugin:<name>:credential.read` for policy and confirmation gates. Provider-sourced secrets require destination-bound metadata; selector overrides are limited to saved profiles, and `--url` acts as an exact provider-response assertion.
 
 ## Action Confirmation
 

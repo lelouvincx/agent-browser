@@ -1486,14 +1486,20 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_AUTH_LOGIN,
             "Auth login",
-            "Log in with a saved auth profile.",
+            "Log in with a saved auth profile or destination-bound credential provider.",
             json!({
                 "name": { "type": "string" },
                 "noNavigate": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Use the active top-level page without performing the initial login navigation. The credential URL must match the page origin."
-                }
+                    "description": "Use the active top-level page without performing the initial login navigation. Saved profiles require a matching origin. Credential providers require the exact approved login URL."
+                },
+                "credentialProvider": { "type": "string" },
+                "item": { "type": "string" },
+                "url": { "type": "string", "description": "Saved-profile override or provider URL assertion." },
+                "usernameSelector": { "type": "string", "description": "Saved-profile login only." },
+                "passwordSelector": { "type": "string", "description": "Saved-profile login only." },
+                "submitSelector": { "type": "string", "description": "Saved-profile login only." }
             }),
             &["name"],
         ),
@@ -3152,6 +3158,19 @@ fn auth_login_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     if optional_bool(arguments, "noNavigate")?.unwrap_or(false) {
         args.push("--no-navigate".to_string());
     }
+    for (key, flag) in [
+        ("credentialProvider", "--credential-provider"),
+        ("item", "--item"),
+        ("url", "--url"),
+        ("usernameSelector", "--username-selector"),
+        ("passwordSelector", "--password-selector"),
+        ("submitSelector", "--submit-selector"),
+    ] {
+        if let Some(value) = optional_string(arguments, key)? {
+            args.push(flag.to_string());
+            args.push(value);
+        }
+    }
     Ok(args)
 }
 
@@ -4072,6 +4091,39 @@ mod tests {
         assert!(props.get("headed").is_some());
         assert!(props.get("webgpu").is_some());
         assert!(props.get("webmcp").is_some());
+    }
+
+    #[test]
+    fn auth_login_tool_forwards_cli_options() {
+        let tools = tools();
+        let auth_login = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some(TOOL_AUTH_LOGIN))
+            .unwrap();
+        let properties = &auth_login["inputSchema"]["properties"];
+        assert!(properties.get("credentialProvider").is_some());
+        assert!(properties.get("item").is_some());
+
+        assert_eq!(
+            auth_login_args(&json!({
+                "name": "example",
+                "credentialProvider": "vault",
+                "item": "Example account",
+                "url": "https://example.com/login"
+            }))
+            .unwrap(),
+            vec![
+                "auth",
+                "login",
+                "example",
+                "--credential-provider",
+                "vault",
+                "--item",
+                "Example account",
+                "--url",
+                "https://example.com/login"
+            ]
+        );
     }
 
     #[test]

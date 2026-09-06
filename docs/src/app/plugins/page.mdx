@@ -288,6 +288,7 @@ A credential plugin receives:
   "type": "credential.resolve",
   "capability": "credential.read",
   "request": {
+    "credentialContract": "destination-bound-v1",
     "profileName": "my-app",
     "itemRef": "My App",
     "url": "https://app.example.com/login"
@@ -304,13 +305,26 @@ Return `credential`:
   "credential": {
     "username": "alice@example.com",
     "password": "secret",
+    "otp": "123456",
     "url": "https://app.example.com/login",
+    "credentialOrigin": "https://app.example.com",
     "usernameSelector": "#username",
     "passwordSelector": "#password",
-    "submitSelector": "input[type=submit]"
+    "submitSelector": "input[type=submit]",
+    "otpSelector": "#otp",
+    "otpSubmitSelector": "#verify",
+    "expectedPostLoginUrl": "https://app.example.com/account",
+    "accountMarkerSelector": "[data-account-email]",
+    "accountMarkerValue": "alice@example.com"
   }
 }
 ```
+
+The `destination-bound-v1` fields are required except `otp`, `otpSelector`, and `otpSubmitSelector`, which must either all be present or all be omitted. `credentialOrigin` must be an HTTP or HTTPS origin shared by `url` and `expectedPostLoginUrl`. The login and account selectors must each identify one element when used.
+
+agent-browser enters credentials in one main-frame operation after checking the exact login URL, origin, controls, and form destination. During submission it blocks the active page from navigating to another origin and blocks credential values from appearing in off-origin request URLs or bodies. OTP supports controls inside one form or form-less controls associated with no form. A provider login succeeds only when the browser reaches `expectedPostLoginUrl` and exactly one `accountMarkerSelector` contains `accountMarkerValue`; otherwise the login page is closed.
+
+The optional CLI `--url` value is sent to the provider and then checked for exact equality with the returned `url`. Selector overrides are rejected for provider logins because selectors are part of the destination-bound policy.
 
 Use it for one login:
 

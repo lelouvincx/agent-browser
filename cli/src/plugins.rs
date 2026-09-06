@@ -12,6 +12,9 @@ use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 
 pub const PROTOCOL_VERSION: &str = "agent-browser.plugin.v1";
+/// Credential response contract that binds secret entry and success checks to
+/// provider-approved destinations.
+pub const CREDENTIAL_CONTRACT: &str = "destination-bound-v1";
 pub const TYPE_PLUGIN_MANIFEST: &str = "plugin.manifest";
 pub const CAPABILITY_CREDENTIAL_READ: &str = "credential.read";
 pub const CAPABILITY_BROWSER_PROVIDER: &str = "browser.provider";
@@ -41,16 +44,26 @@ pub struct CredentialResolveRequest<'a> {
 pub struct ResolvedCredential {
     pub username: String,
     pub password: String,
-    #[serde(default)]
-    pub url: Option<String>,
+    /// Exact URL where the primary credential controls are approved.
+    pub url: String,
+    /// Optional one-time password. OTP selectors must be present with it.
     #[serde(default)]
     pub otp: Option<String>,
+    /// Serialized HTTP(S) origin shared by the login and verified destination.
+    pub credential_origin: String,
+    pub username_selector: String,
+    pub password_selector: String,
+    pub submit_selector: String,
+    /// Optional OTP control, including controls not associated with a form.
     #[serde(default)]
-    pub username_selector: Option<String>,
+    pub otp_selector: Option<String>,
     #[serde(default)]
-    pub password_selector: Option<String>,
-    #[serde(default)]
-    pub submit_selector: Option<String>,
+    pub otp_submit_selector: Option<String>,
+    /// Exact URL required before a provider login can report success.
+    pub expected_post_login_url: String,
+    /// Unique element and expected text used to verify the logged-in account.
+    pub account_marker_selector: String,
+    pub account_marker_value: String,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -280,6 +293,7 @@ pub async fn resolve_credential_with_plugins(
         "credential.resolve",
         CAPABILITY_CREDENTIAL_READ,
         json!({
+            "credentialContract": CREDENTIAL_CONTRACT,
             "profileName": request.profile_name,
             "itemRef": request.item_ref,
             "url": request.url,
@@ -305,9 +319,60 @@ pub async fn resolve_credential_with_plugins(
     let credential = response
         .credential
         .ok_or_else(|| format!("Credential plugin '{}' returned no credential", provider))?;
-    if credential.username.is_empty() || credential.password.is_empty() {
+    if credential.username.trim().is_empty()
+        || credential.password.is_empty()
+        || credential.url.trim().is_empty()
+        || credential.credential_origin.trim().is_empty()
+        || credential.username_selector.trim().is_empty()
+        || credential.password_selector.trim().is_empty()
+        || credential.submit_selector.trim().is_empty()
+        || credential.expected_post_login_url.trim().is_empty()
+        || credential.account_marker_selector.trim().is_empty()
+        || credential.account_marker_value.trim().is_empty()
+        || credential.otp.as_ref().is_some_and(|otp| otp.is_empty())
+        || credential.otp.is_some() != credential.otp_selector.is_some()
+        || credential.otp.is_some() != credential.otp_submit_selector.is_some()
+    {
         return Err(format!(
             "Credential plugin '{}' returned an incomplete credential",
+            provider
+        ));
+    }
+    let credential_origin = url::Url::parse(&credential.credential_origin)
+        .ok()
+        .filter(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.username().is_empty()
+                && url.password().is_none()
+                && !url.cannot_be_a_base()
+                && url.origin().ascii_serialization() == credential.credential_origin
+                && matches!(url.path(), "" | "/")
+                && url.query().is_none()
+                && url.fragment().is_none()
+        })
+        .map(|url| url.origin().ascii_serialization());
+    let login_origin = url::Url::parse(&credential.url)
+        .ok()
+        .filter(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.username().is_empty()
+                && url.password().is_none()
+        })
+        .map(|url| url.origin().ascii_serialization());
+    let expected_origin = url::Url::parse(&credential.expected_post_login_url)
+        .ok()
+        .filter(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.username().is_empty()
+                && url.password().is_none()
+        })
+        .map(|url| url.origin().ascii_serialization());
+    if credential_origin.is_none()
+        || credential_origin.as_ref() != login_origin.as_ref()
+        || credential_origin.as_ref() != expected_origin.as_ref()
+    {
+        return Err(format!(
+            "Credential plugin '{}' returned inconsistent destination policy",
             provider
         ));
     }
@@ -1143,10 +1208,14 @@ mod tests {
         let plugin_path = dir.path().join("mock-credential-plugin");
         std::fs::write(
             &plugin_path,
-            r#"#!/bin/sh
-cat >/dev/null
-printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"credential":{"username":"user","password":"pass","url":"https://example.com/login"}}'
-"#,
+            r##"#!/bin/sh
+request="$(cat)"
+case "$request" in
+  *'"credentialContract":"destination-bound-v1"'*) ;;
+  *) printf '%s' '{"protocol":"agent-browser.plugin.v1","success":false}'; exit 0 ;;
+esac
+printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"credential":{"username":"user","password":"pass","url":"https://example.com/login","credentialOrigin":"https://example.com","usernameSelector":"#user","passwordSelector":"#pass","submitSelector":"#submit","expectedPostLoginUrl":"https://example.com/account","accountMarkerSelector":"#account","accountMarkerValue":"user"}}'
+"##,
         )
         .unwrap();
         let mut perms = std::fs::metadata(&plugin_path).unwrap().permissions();
@@ -1177,7 +1246,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"credential":{
 
         assert_eq!(credential.username, "user");
         assert_eq!(credential.password, "pass");
-        assert_eq!(credential.url.as_deref(), Some("https://example.com/login"));
+        assert_eq!(credential.url, "https://example.com/login");
+        assert_eq!(credential.credential_origin, "https://example.com");
     }
 
     #[cfg(unix)]

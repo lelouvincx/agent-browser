@@ -230,7 +230,9 @@ agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"...","url"
 
 `plugin run` is for `command.run` and custom capabilities. Core capabilities and protocol request types use their dedicated command paths.
 
-Use `--url`, `--username-selector`, `--password-selector`, and `--submit-selector` on `auth login` to override plugin-provided metadata for the current login only.
+Credential providers must implement the `destination-bound-v1` contract. They provide the exact login URL, approved origin, field and submit selectors, expected post-login URL, and an account marker. Optional OTP includes both the OTP field and submit selectors and works with form-based or form-less pages. agent-browser rejects inconsistent destination metadata, enters values only in the approved main-frame document, blocks off-origin document and credential-bearing requests during login, and verifies both final destination and account identity before reporting success.
+
+For provider logins, `--url` asserts that the provider returned the expected login URL. It does not override provider policy. Selector overrides apply only to saved-profile logins.
 
 Gate plugin secret access separately from normal login automation:
 

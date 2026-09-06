@@ -10,7 +10,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -6014,6 +6014,350 @@ async fn e2e_auth_login_waits_for_delayed_spa_form_render() {
 
     let close = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&close);
+}
+
+#[cfg(unix)]
+fn write_destination_bound_login_plugin(
+    credential: Value,
+) -> (tempfile::TempDir, crate::plugins::PluginConfig) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("credential-plugin");
+    let response = json!({
+        "protocol": crate::plugins::PROTOCOL_VERSION,
+        "success": true,
+        "credential": credential,
+    });
+    std::fs::write(
+        &path,
+        format!("#!/bin/sh\ncat >/dev/null\nprintf '%s' '{}'\n", response),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&path, permissions).unwrap();
+    let plugin = crate::plugins::PluginConfig {
+        name: "destination-test".to_string(),
+        command: path.to_string_lossy().to_string(),
+        capabilities: vec![crate::plugins::CAPABILITY_CREDENTIAL_READ.to_string()],
+        ..crate::plugins::PluginConfig::default()
+    };
+    (directory, plugin)
+}
+
+async fn start_destination_bound_login_server(
+    mode: &'static str,
+) -> (String, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{}", port);
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = requests.clone();
+    let server_base = base_url.clone();
+    let handle = tokio::spawn(async move {
+        for _ in 0..100 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let recorded = recorded.clone();
+            let server_base = server_base.clone();
+            tokio::spawn(async move {
+                let mut buffer = vec![0u8; 16 * 1024];
+                let count = stream.read(&mut buffer).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..count]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/")
+                    .to_string();
+                recorded.lock().unwrap().push(path.clone());
+
+                let (status, extra_headers, body) = if path == "/pre" {
+                    (
+                        "200 OK",
+                        "",
+                        "<!doctype html><iframe id=f src='/frame'></iframe>".to_string(),
+                    )
+                } else if path == "/frame" {
+                    ("200 OK", "", "<!doctype html><input id=decoy>".to_string())
+                } else if path == "/redirect" {
+                    (
+                        "302 Found",
+                        "Location: https://example.invalid/login\r\n",
+                        String::new(),
+                    )
+                } else {
+                    let action = if mode == "bad-action" {
+                        "https://example.invalid/session".to_string()
+                    } else {
+                        format!("{}/session", server_base)
+                    };
+                    let replacement = if mode == "replace-document" {
+                        "document.querySelector('#username').addEventListener('input', () => { document.open(); document.write(`<form action=\"https://example.invalid/session\"><input id=\"password\"><button id=\"submit\"></button></form>`); document.close(); });"
+                    } else {
+                        ""
+                    };
+                    let marker = if mode == "wrong-identity" {
+                        "different-user"
+                    } else {
+                        "synthetic-user"
+                    };
+                    let otp_flow = if mode == "no-otp" {
+                        format!(
+                            "history.replaceState(null, '', '/account'); document.body.innerHTML = `<div id=\"account\">{marker}</div>`;"
+                        )
+                    } else if mode == "formless-otp" {
+                        format!(
+                            "document.body.innerHTML = `<input id=\"otp\"><button id=\"otp-submit\" type=\"button\">Verify</button>`; document.querySelector('#otp-submit').addEventListener('click', () => {{ history.replaceState(null, '', '/account'); document.body.innerHTML = `<div id=\"account\">{marker}</div>`; }});"
+                        )
+                    } else {
+                        format!(
+                            "document.body.innerHTML = `<form id=\"otp-form\" action=\"{server_base}/otp\"><input id=\"otp\"><button id=\"otp-submit\" type=\"submit\">Verify</button></form>`; document.querySelector('#otp-form').addEventListener('submit', otpEvent => {{ otpEvent.preventDefault(); history.replaceState(null, '', '/account'); document.body.innerHTML = `<div id=\"account\">{marker}</div>`; }});"
+                        )
+                    };
+                    let body = format!(
+                        r#"<!doctype html><form id="login" action="{action}">
+<input id="username"><input id="password" type="password"><button id="submit" type="submit">Login</button></form>
+<script>
+{replacement}
+document.querySelector('#login').addEventListener('submit', event => {{
+  event.preventDefault();
+  {otp_flow}
+}});
+</script>"#,
+                    );
+                    ("200 OK", "", body)
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: text/html\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+    (base_url, requests, handle)
+}
+
+#[cfg(unix)]
+fn destination_bound_credential(base_url: &str, login_path: &str, marker: &str) -> Value {
+    json!({
+        "username": "synthetic-user",
+        "password": "synthetic-password",
+        "otp": "123456",
+        "url": format!("{base_url}{login_path}"),
+        "credentialOrigin": base_url,
+        "usernameSelector": "#username",
+        "passwordSelector": "#password",
+        "submitSelector": "#submit",
+        "otpSelector": "#otp",
+        "otpSubmitSelector": "#otp-submit",
+        "expectedPostLoginUrl": format!("{base_url}/account"),
+        "accountMarkerSelector": "#account",
+        "accountMarkerValue": marker,
+    })
+}
+
+#[cfg(unix)]
+async fn run_destination_bound_provider_login(
+    mode: &'static str,
+    login_path: &str,
+    marker: &str,
+) -> Value {
+    let (base_url, _requests, server) = start_destination_bound_login_server(mode).await;
+    let mut credential = destination_bound_credential(&base_url, login_path, marker);
+    if mode == "no-otp" {
+        credential.as_object_mut().unwrap().remove("otp");
+        credential.as_object_mut().unwrap().remove("otpSelector");
+        credential
+            .as_object_mut()
+            .unwrap()
+            .remove("otpSubmitSelector");
+    }
+    let (_plugin_dir, plugin) = write_destination_bound_login_plugin(credential);
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    if mode == "stale-frame" {
+        assert_success(
+            &execute_command(
+                &json!({ "id": "2", "action": "navigate", "url": format!("{base_url}/pre") }),
+                &mut state,
+            )
+            .await,
+        );
+        assert_success(
+            &execute_command(
+                &json!({ "id": "3", "action": "frame", "selector": "#f" }),
+                &mut state,
+            )
+            .await,
+        );
+    }
+    let mut command = json!({
+        "id": "4",
+        "action": "auth_login",
+        "name": "synthetic",
+        "credentialProvider": "destination-test",
+        "plugins": [plugin],
+        "timeout": 3000,
+    });
+    if mode == "selector-override" {
+        command["usernameSelector"] = json!("#other");
+    }
+    let response = execute_command(&command, &mut state).await;
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    server.abort();
+    response
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn e2e_provider_login_is_destination_checked_and_supports_otp() {
+    let response = run_destination_bound_provider_login("no-otp", "/login", "synthetic-user").await;
+    assert_success(&response);
+    assert_eq!(get_data(&response)["verified"], true);
+
+    let response =
+        run_destination_bound_provider_login("stale-frame", "/login", "synthetic-user").await;
+    assert_success(&response);
+    assert_eq!(get_data(&response)["verified"], true);
+
+    let response =
+        run_destination_bound_provider_login("formless-otp", "/login", "synthetic-user").await;
+    assert_success(&response);
+    assert_eq!(get_data(&response)["verified"], true);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn e2e_provider_login_rejects_wrong_destination_and_identity() {
+    for (mode, path, marker) in [
+        ("redirect", "/redirect", "synthetic-user"),
+        ("bad-action", "/login", "synthetic-user"),
+        ("replace-document", "/login", "synthetic-user"),
+        ("wrong-identity", "/login", "synthetic-user"),
+        ("selector-override", "/login", "synthetic-user"),
+    ] {
+        let response = run_destination_bound_provider_login(mode, path, marker).await;
+        assert_eq!(response["success"], false, "mode {mode}: {response}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn e2e_provider_login_blocks_cross_origin_document_redirect() {
+    let sink = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sink_port = sink.local_addr().unwrap().port();
+    let sink_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let sink_count = sink_requests.clone();
+    let sink_server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = sink.accept().await {
+            sink_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .await;
+        }
+    });
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let approved_posts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let approved_count = approved_posts.clone();
+    let approved_credentials = Arc::new(AtomicBool::new(false));
+    let credential_match = approved_credentials.clone();
+    let approved_server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let approved_count = approved_count.clone();
+            let credential_match = credential_match.clone();
+            tokio::spawn(async move {
+                let mut request = vec![0u8; 16 * 1024];
+                let count = stream.read(&mut request).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..count]);
+                let is_post = request.starts_with("POST /session ");
+                let (status, headers, body) = if is_post {
+                    approved_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    credential_match.store(
+                        request.contains("username=synthetic-user")
+                            && request.contains("password=synthetic-password"),
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    (
+                        "307 Temporary Redirect",
+                        format!(
+                            "Location: http://127.0.0.1:{sink_port}/stolen?user=synthetic-user\r\n"
+                        ),
+                        String::new(),
+                    )
+                } else {
+                    (
+                        "200 OK",
+                        String::new(),
+                        format!(
+                            r#"<!doctype html><form id="login" action="http://127.0.0.1:{port}/session" method="post"><input id="username" name="username"><input id="password" name="password"><button id="submit" type="submit">Login</button></form>"#
+                        ),
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: text/html\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut credential = destination_bound_credential(&base_url, "/login", "synthetic-user");
+    credential.as_object_mut().unwrap().remove("otp");
+    credential.as_object_mut().unwrap().remove("otpSelector");
+    credential
+        .as_object_mut()
+        .unwrap()
+        .remove("otpSubmitSelector");
+    let (_plugin_dir, plugin) = write_destination_bound_login_plugin(credential);
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    let response = execute_command(
+        &json!({
+            "id": "2",
+            "action": "auth_login",
+            "name": "synthetic",
+            "credentialProvider": "destination-test",
+            "plugins": [plugin],
+            "timeout": 3000,
+        }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(response["success"], false, "{response}");
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    assert_eq!(approved_posts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(approved_credentials.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        sink_requests.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "unapproved origin received a credential request"
+    );
+    approved_server.abort();
+    sink_server.abort();
 }
 
 // ---------------------------------------------------------------------------

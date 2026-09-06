@@ -919,9 +919,10 @@ Use a credential provider plugin for one login:
 
 ```bash
 agent-browser auth login my-app --credential-provider vault --item "My App"
-agent-browser auth login my-app --credential-provider vault --item "My App" --url https://app.example.com/login --username-selector "#email" --password-selector "#password" --submit-selector "button[type=submit]"
-agent-browser auth login my-app --credential-provider vault --item "My App" --no-navigate --url https://identity.example.com/login
+agent-browser auth login my-app --credential-provider vault --item "My App" --url https://app.example.com/login
 ```
+
+Credential providers use the `destination-bound-v1` contract. The provider supplies the exact login URL, approved origin, selectors, expected post-login URL, and account identity marker along with optional OTP metadata. agent-browser fills and submits credentials only in the approved main-frame document, blocks credential-bearing requests and document navigation to other origins during the attempt, supports form and form-less OTP steps, and reports success only after the expected URL and account marker are both present. `--url` is an assertion against the provider response; selector overrides are available only for saved profiles.
 
 Use a browser provider plugin:
 

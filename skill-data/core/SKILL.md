@@ -238,9 +238,10 @@ If credentials live in an external vault, use a configured credential provider p
 agent-browser plugin add agent-browser-plugin-vault --name vault
 agent-browser plugin list
 agent-browser auth login my-app --credential-provider vault --item "My App"
-agent-browser auth login my-app --credential-provider vault --item "My App" --url https://app.example.com/login --username-selector "#email" --password-selector "#password"
-agent-browser auth login my-app --credential-provider vault --item "My App" --no-navigate --url https://identity.example.com/login
+agent-browser auth login my-app --credential-provider vault --item "My App" --url https://app.example.com/login
 ```
+
+Provider logins require the `destination-bound-v1` contract. They bind credential entry and optional OTP to the provider-approved origin and verify the final URL and account identity before reporting success. `--url` asserts the provider's login URL. Use selector overrides only with saved profiles.
 
 Plugins can also provide browser providers, launch mutators such as stealth setup, and arbitrary namespaced commands:
 

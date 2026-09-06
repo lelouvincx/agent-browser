@@ -2653,11 +2653,11 @@ Save Options:
 Login Options:
   --credential-provider <p> Resolve credentials from configured plugin <p>
   --item <ref>              Provider-specific vault item reference
-  --url <url>               Login URL override
   --no-navigate             Use the active top-level page without initial navigation
-  --username-selector <s>   Username selector override for this login
-  --password-selector <s>   Password selector override for this login
-  --submit-selector <s>     Submit selector override for this login
+  --url <url>               Saved-profile override or provider URL assertion
+  --username-selector <s>   Saved-profile username selector override for this login
+  --password-selector <s>   Saved-profile password selector override for this login
+  --submit-selector <s>     Saved-profile submit selector override for this login
 
 Login behavior:
   auth login navigates, then waits for form selectors before filling/clicking.
@@ -2665,6 +2665,9 @@ Login behavior:
   against the effective credential URL. Submit-triggered navigation is allowed.
   Selector wait timeout follows the default action timeout.
   Plugin credentials are resolved just-in-time and are not saved locally.
+  Plugin logins require the destination-bound-v1 credential contract.
+  Credentials stay on the approved origin; success verifies URL and account.
+  Selector overrides apply only to saved-profile logins.
 
 Global Options:
   --json                   Output as JSON
@@ -3812,9 +3815,9 @@ Auth Vault:
   auth login <name> --no-navigate
                              Use active page after verifying credential URL origin
   auth login <name> --credential-provider <plugin> [--item <ref>] [--url <url>]
-                             Resolve credentials from a configured plugin
+                             Run a destination-bound login from a configured plugin
   auth login <name> --username-selector <s> --password-selector <s>
-                             Override selectors for one login
+                             Override selectors for one saved-profile login
   auth list                  List saved auth profiles
   auth show <name>           Show auth profile metadata
   auth delete <name>         Delete auth profile
