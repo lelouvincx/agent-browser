@@ -19,6 +19,9 @@ use windows_sys::Win32::Foundation::CloseHandle;
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
+/// Identifies daemon-compatible builds, including custom builds that share the
+/// same package version. Generated from the native source and build inputs.
+pub(crate) const DAEMON_BUILD_ID: &str = env!("AGENT_BROWSER_BUILD_ID");
 pub(crate) const INTERNAL_DAEMON_SHUTDOWN_ACTION: &str = "__agent_browser_internal_shutdown";
 
 #[derive(Serialize)]
@@ -707,7 +710,7 @@ fn concurrent_daemon_config_error(session: &str) -> String {
 fn daemon_version_matches(session: &str) -> bool {
     let version_path = get_version_path(session);
     match fs::read_to_string(&version_path) {
-        Ok(v) => v.trim() == env!("CARGO_PKG_VERSION"),
+        Ok(v) => v.trim() == DAEMON_BUILD_ID,
         Err(_) => false,
     }
 }
@@ -1551,9 +1554,25 @@ mod tests {
         _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.to_str().unwrap());
 
         let version_path = dir.join("test-session.version");
-        let _ = fs::write(&version_path, env!("CARGO_PKG_VERSION"));
+        let _ = fs::write(&version_path, DAEMON_BUILD_ID);
 
         assert!(daemon_version_matches("test-session"));
+
+        let _ = fs::remove_file(&version_path);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_daemon_version_rejects_semver_without_build_identity() {
+        let dir = std::env::temp_dir().join("ab-test-semver-only-version-mismatch");
+        let _ = fs::create_dir_all(&dir);
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.to_str().unwrap());
+
+        let version_path = dir.join("test-session.version");
+        let _ = fs::write(&version_path, env!("CARGO_PKG_VERSION"));
+
+        assert!(!daemon_version_matches("test-session"));
 
         let _ = fs::remove_file(&version_path);
         let _ = fs::remove_dir(&dir);

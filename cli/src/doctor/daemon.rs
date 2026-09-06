@@ -1,12 +1,12 @@
-//! Check running daemons: inventory of sessions, version match with the
+//! Check running daemons: inventory of sessions, build match with the
 //! CLI, and stale sidecar files cleaned up as a side effect of the walk.
 
 use super::{Check, Status};
-use crate::connection::{walk_daemons, CleanReason};
+use crate::connection::{walk_daemons, CleanReason, DAEMON_BUILD_ID};
 
 pub(super) fn check(checks: &mut Vec<Check>) {
     let category = "Daemons";
-    let cli_version = env!("CARGO_PKG_VERSION");
+    let cli_build = DAEMON_BUILD_ID;
 
     let inventory = walk_daemons();
 
@@ -33,7 +33,7 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         ));
     } else {
         for session in &inventory.sessions {
-            let version_match = session.version.as_deref() == Some(cli_version);
+            let version_match = session.version.as_deref() == Some(cli_build);
             let status = if version_match {
                 Status::Pass
             } else {
@@ -42,7 +42,7 @@ pub(super) fn check(checks: &mut Vec<Check>) {
             let suffix = if version_match {
                 String::new()
             } else {
-                format!(" (version mismatch with CLI {})", cli_version)
+                format!(" (build mismatch with CLI {})", cli_build)
             };
             let mut check = Check::new(
                 format!("daemon.session.{}", session.name),

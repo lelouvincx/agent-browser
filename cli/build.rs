@@ -1,7 +1,58 @@
 use std::collections::HashSet;
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+fn collect_source_files(directory: &Path, files: &mut Vec<PathBuf>) {
+    let mut entries = fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", directory.display()))
+        .map(|entry| entry.expect("failed to read source entry").path())
+        .collect::<Vec<_>>();
+    entries.sort();
+
+    for path in entries {
+        if path.is_dir() {
+            collect_source_files(&path, files);
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            files.push(path);
+        }
+    }
+}
+
+fn hash_bytes(hash: &mut u64, bytes: &[u8]) {
+    // FNV-1a is sufficient here: the build identity detects incompatible
+    // binaries, rather than serving as a security boundary.
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(0x100000001b3);
+    }
+}
+
+fn emit_build_identity() {
+    let mut inputs = vec![PathBuf::from("Cargo.toml"), PathBuf::from("Cargo.lock")];
+    collect_source_files(Path::new("src"), &mut inputs);
+    inputs.sort();
+
+    let mut hash = 0xcbf29ce484222325_u64;
+    for path in inputs {
+        println!("cargo:rerun-if-changed={}", path.display());
+        hash_bytes(&mut hash, path.to_string_lossy().as_bytes());
+        hash_bytes(
+            &mut hash,
+            &fs::read(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display())),
+        );
+    }
+
+    for variable in ["PROFILE", "TARGET", "CARGO_ENCODED_RUSTFLAGS"] {
+        println!("cargo:rerun-if-env-changed={variable}");
+        hash_bytes(&mut hash, variable.as_bytes());
+        hash_bytes(&mut hash, env::var(variable).unwrap_or_default().as_bytes());
+    }
+
+    let build_id = format!("{}+{hash:016x}", env!("CARGO_PKG_VERSION"));
+    println!("cargo:rustc-env=AGENT_BROWSER_BUILD_ID={build_id}");
+}
 
 /// Ensure `packages/dashboard/out/` exists so `rust-embed` doesn't fail during
 /// Rust-only dev builds where the dashboard hasn't been built. The placeholder
@@ -19,6 +70,7 @@ fn ensure_dashboard_dir() {
 }
 
 fn main() {
+    emit_build_identity();
     ensure_dashboard_dir();
 
     let protocol_dir = Path::new("cdp-protocol");
